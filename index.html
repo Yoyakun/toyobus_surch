@@ -101,7 +101,13 @@ button:hover{background:#1565c0}
 <h1>🚌 バス運用検索</h1>
 
 <div class="card">
-  <label for="operation">運用番号</label>
+  <label for="searchType">検索方法</label>
+  <select id="searchType" style="width:100%;padding:14px;border:1px solid #ccc;border-radius:9px;font-size:18px;">
+    <option value="operation">運用番号から検索</option>
+    <option value="vehicle">車両番号から検索</option>
+  </select>
+
+  <label for="operation" id="searchLabel" style="margin-top:14px;">運用番号</label>
   <input id="operation" type="text" placeholder="例：平01-1、平01、土01、休01">
   <button id="searchButton">検索</button>
 </div>
@@ -560,6 +566,139 @@ function operationNumberForVehicle(operation){
   return Number(m[1]);
 }
 
+function findOperationByVehicle(vehicleInput, date){
+  const d = new Date(date + "T12:00:00");
+  const monthSheet = `${d.getMonth()+1}月`;
+
+  const sheet = vehicleWorkbook.Sheets[monthSheet];
+
+  if(!sheet){
+    return {
+      operation:null,
+      value:null,
+      message:`号車表に「${monthSheet}」シートがありません。`
+    };
+  }
+
+  const rows = XLSX.utils.sheet_to_json(sheet, {
+    header:1,
+    defval:"",
+    raw:true
+  });
+
+  if(rows.length < 2){
+    return {
+      operation:null,
+      value:null,
+      message:"号車表のデータがありません。"
+    };
+  }
+
+  // 2行目の日付から今日の列を探す
+  let dateColumn = -1;
+
+  for(let c=2; c<(rows[1] || []).length; c++){
+    const value = rows[1][c];
+    let d2 = null;
+
+    if(value instanceof Date){
+      d2 = value;
+    }else if(typeof value === "number"){
+      const utc = new Date(Date.UTC(1899,11,30) + value*86400000);
+      d2 = new Date(
+        utc.getUTCFullYear(),
+        utc.getUTCMonth(),
+        utc.getUTCDate()
+      );
+    }else{
+      const s = normalizeText(value).replace(/[./]/g,"-");
+      const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+      if(m){
+        d2 = new Date(
+          Number(m[1]),
+          Number(m[2])-1,
+          Number(m[3])
+        );
+      }
+    }
+
+    if(d2){
+      const ymd =
+        `${d2.getFullYear()}-${String(d2.getMonth()+1).padStart(2,"0")}-${String(d2.getDate()).padStart(2,"0")}`;
+
+      if(ymd === date){
+        dateColumn = c;
+        break;
+      }
+    }
+  }
+
+  if(dateColumn === -1){
+    return {
+      operation:null,
+      value:null,
+      message:`号車表「${monthSheet}」に ${date} の列がありません。`
+    };
+  }
+
+  const target = normalizeText(vehicleInput)
+    .replace(/\s+/g,"")
+    .replace(/号車$/,"");
+
+  if(!target){
+    return {
+      operation:null,
+      value:null,
+      message:"車両番号を入力してください。"
+    };
+  }
+
+  const matches = [];
+
+  for(let r=2; r<rows.length; r++){
+    const operationCell = rows[r][0];
+    const vehicleCell = rows[r][dateColumn];
+
+    if(
+      operationCell === null ||
+      operationCell === undefined ||
+      operationCell === "" ||
+      vehicleCell === null ||
+      vehicleCell === undefined ||
+      vehicleCell === ""
+    ){
+      continue;
+    }
+
+    const vehicle = normalizeText(vehicleCell)
+      .replace(/\s+/g,"")
+      .replace(/号車$/,"");
+
+    if(vehicle === target){
+      matches.push({
+        operation: String(operationCell).trim(),
+        vehicle: String(vehicleCell).trim()
+      });
+    }
+  }
+
+  if(matches.length === 0){
+    return {
+      operation:null,
+      value:null,
+      message:`${vehicleInput} に該当する運用番号が今日の号車表にありません。`
+    };
+  }
+
+  return {
+    operation:matches[0].operation,
+    value:matches[0].vehicle,
+    sheet:monthSheet,
+    matches
+  };
+}
+
+
 function findVehicle(operation, date){
   const d = new Date(date + "T12:00:00");
   const monthSheet = `${d.getMonth()+1}月`;
@@ -675,16 +814,18 @@ function findVehicle(operation, date){
 
 async function searchBus(){
   const input = document.getElementById("operation");
+  const searchType = document.getElementById("searchType").value;
   const status = document.getElementById("status");
   const result = document.getElementById("result");
 
-  const operation = normalizeText(input.value);
+  const keyword = normalizeText(input.value);
 
   status.innerHTML = "🔄 データを読み込んでいます…";
   result.innerHTML = "";
 
-  if(!operation){
-    status.innerHTML = '<span class="error">運用番号を入力してください。</span>';
+  if(!keyword){
+    status.innerHTML =
+      '<span class="error">検索する番号を入力してください。</span>';
     return;
   }
 
@@ -694,11 +835,35 @@ async function searchBus(){
     const date = todayString();
     const type = dayType(date);
 
+    let operation = keyword;
+    let vehicleInfo = null;
+
+    // 車両番号検索の場合：
+    // 今日の号車表から「車両番号 → 運用番号」を逆引きする
+    if(searchType === "vehicle"){
+      vehicleInfo = findOperationByVehicle(keyword, date);
+
+      if(!vehicleInfo.operation){
+        status.innerHTML =
+          `<span class="error">${esc(vehicleInfo.message || "該当する車両がありません。")}</span>`;
+
+        result.innerHTML = `
+          <div class="result">
+            <p>検索日：${esc(date)}</p>
+            <p>対象月：${esc(new Date(date+"T12:00:00").getMonth()+1)}月</p>
+          </div>`;
+        return;
+      }
+
+      operation = vehicleInfo.operation;
+    }
+
+    // 運用表から現在の運行を検索
     const block = findOperation(operation,date);
 
     if(!block){
       status.innerHTML =
-        `<span class="error">「${esc(operation)}」に該当する運用番号がありません。</span>`;
+        `<span class="error">「${esc(operation)}」に該当する運用表がありません。</span>`;
 
       result.innerHTML = `
         <div class="result">
@@ -706,15 +871,12 @@ async function searchBus(){
           <p class="small">
             検索対象：${esc(scheduleSheetNames(date).join(" / "))}
           </p>
-          <p class="small">
-            入力例：平01、平01-1、土01、休01
-          </p>
         </div>`;
       return;
     }
 
     const resultTrip = findCurrentTrip(block);
-    const vehicle = findVehicle(operation,date);
+    const vehicle = vehicleInfo || findVehicle(operation,date);
 
     if(resultTrip.current){
       const trip = resultTrip.current;
@@ -727,7 +889,7 @@ async function searchBus(){
           <div class="route">${esc(trip.route || "系統情報なし")}</div>
 
           <div class="line">
-            仕業番号：${esc(block.actualOperation)}<br>
+            仕業番号：${esc(block.actualOperation || operation)}<br>
             運行表：${esc(block.sheetName)}
           </div>
 
@@ -745,13 +907,14 @@ async function searchBus(){
           </div>
 
           <div class="bus">
-            🚌 ${vehicle.value ? esc(vehicle.value) : "号車情報なし"}
+            🚌 ${vehicle && vehicle.value ? esc(vehicle.value) : "号車情報なし"}
           </div>
 
           <div class="meta">
             ${date} ${formatMinutes(nowMinutes())} 現在<br>
             今日の区分：${esc(type)}<br>
-            ${vehicle.value ? "号車表：" + esc(vehicle.sheet) : esc(vehicle.message || "")}
+            ${searchType === "vehicle" ? `車両番号 ${esc(keyword)} → 運用番号 ${esc(block.actualOperation || operation)}<br>` : ""}
+            ${vehicle && vehicle.value ? "号車表：" + esc(vehicle.sheet || "") : esc((vehicle && vehicle.message) || "")}
           </div>
 
         </div>
@@ -762,7 +925,8 @@ async function searchBus(){
 
     const np = findNextAndPrevious(resultTrip.trips);
 
-    status.innerHTML = "⚪ 現在この仕業の営業便は運行していません。";
+    status.innerHTML =
+      "⚪ 現在この仕業の営業便は運行していません。";
 
     let detail = "";
 
@@ -790,14 +954,15 @@ async function searchBus(){
 
     result.innerHTML = `
       <div class="result not-running">
-        <div class="route">${esc(operation)}</div>
+        <div class="route">${esc(block.actualOperation || operation)}</div>
+        ${searchType === "vehicle" ? `<p>車両番号：${esc(keyword)}</p>` : ""}
         <p>今日の運行区分：${esc(type)}</p>
         ${detail}
         <div class="bus">
-          🚌 ${vehicle.value ? esc(vehicle.value) : "号車情報なし"}
+          🚌 ${vehicle && vehicle.value ? esc(vehicle.value) : "号車情報なし"}
         </div>
         <div class="meta">
-          ${vehicle.value ? "" : esc(vehicle.message || "")}
+          ${vehicle && vehicle.value ? "" : esc((vehicle && vehicle.message) || "")}
         </div>
       </div>
     `;
@@ -819,6 +984,30 @@ async function searchBus(){
     `;
   }
 }
+
+
+/* -----------------------------
+   検索方法の切り替え
+----------------------------- */
+
+function updateSearchPlaceholder(){
+  const type = document.getElementById("searchType").value;
+  const label = document.getElementById("searchLabel");
+  const input = document.getElementById("operation");
+
+  if(type === "vehicle"){
+    label.textContent = "車両番号";
+    input.placeholder = "例：1234、1234号車";
+  }else{
+    label.textContent = "運用番号";
+    input.placeholder = "例：平01-1、平01、土01、休01";
+  }
+}
+
+document.getElementById("searchType")
+  .addEventListener("change", updateSearchPlaceholder);
+
+updateSearchPlaceholder();
 
 
 /* -----------------------------
