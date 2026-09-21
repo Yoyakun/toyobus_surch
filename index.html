@@ -273,15 +273,46 @@ async function ensureDataLoaded(){
 function scheduleSheetNames(date){
   const type = dayType(date);
 
-  // 「202621から」= 2026年2月1日から、
-  // 「2026101から」= 2026年10月1日から、として扱う
-  const isAfterOct1 = date >= "2026-10-01";
-  const suffix = isAfterOct1 ? "2026101から" : "202621から";
+  // 2026/10/1以降は「2026101から」、それ以前は「202621から」
+  const suffix = date >= "2026-10-01"
+    ? "2026101から"
+    : "202621から";
 
-  return [
+  const names = [
     `${type}(${suffix})`,
     `${type}_中型`
   ];
+
+  return names;
+}
+
+
+/* -----------------------------
+   運用番号の表記を正規化
+----------------------------- */
+
+function normalizeOperation(value){
+  return normalizeText(value)
+    .replace(/[‐‑‒–—−]/g, "-")
+    .replace(/\s+/g, "");
+}
+
+function operationMatches(cellValue, input){
+  const a = normalizeOperation(cellValue);
+  const b = normalizeOperation(input);
+
+  if(!a || !b) return false;
+
+  // 完全一致
+  if(a === b) return true;
+
+  // 「平01」で「平01-1」も検索できるようにする
+  // ただし「平01-1」入力時に別の番号を拾わないようにする
+  if(/^[平土休]\d+$/.test(b)){
+    return a === b || a.startsWith(b + "-");
+  }
+
+  return false;
 }
 
 
@@ -302,19 +333,28 @@ function findOperationBlock(sheetName, operation){
   for(let r=0; r<rows.length; r++){
     const row = rows[r];
 
-    // A列が「運用番号」、B列が入力された仕業番号
+    /*
+      実際の運用表は、
+
+      A列：運用番号
+      B列：仕業番号
+
+      例：
+      運用番号 | 休01 | 米本団地線
+    */
+
     if(
       normalizeText(row[0]) === "運用番号" &&
-      normalizeText(row[1]) === operation
+      operationMatches(row[1], operation)
     ){
+      const actualOperation = normalizeText(row[1]);
       const blockRows = [];
 
       for(let rr=r+1; rr<rows.length; rr++){
         const next = rows[rr];
 
-        if(
-          normalizeText(next[0]) === "運用番号"
-        ){
+        // 次の「運用番号」までがこの仕業のデータ
+        if(normalizeText(next[0]) === "運用番号"){
           break;
         }
 
@@ -323,6 +363,7 @@ function findOperationBlock(sheetName, operation){
 
       return {
         sheetName,
+        actualOperation,
         header: row,
         rows: blockRows
       };
@@ -340,7 +381,29 @@ function findOperationBlock(sheetName, operation){
 function findOperation(operation, date){
   const names = scheduleSheetNames(date);
 
+  // まず今日の区分の通常シートを検索
   for(const name of names){
+    const found = findOperationBlock(name, operation);
+    if(found) return found;
+  }
+
+  /*
+    念のため、日付判定に依存せず、
+    「平」「土」「休」に対応する全シートも検索する。
+    Excelのシート名が少し変わっていても検索できるようにする。
+  */
+  const prefix = normalizeOperation(operation).charAt(0);
+
+  const fallback = operationWorkbook.SheetNames.filter(name => {
+    if(prefix === "平") return name.startsWith("平");
+    if(prefix === "土") return name.startsWith("土");
+    if(prefix === "休") return name.startsWith("休");
+    return false;
+  });
+
+  for(const name of fallback){
+    if(names.includes(name)) continue;
+
     const found = findOperationBlock(name, operation);
     if(found) return found;
   }
@@ -641,7 +704,10 @@ async function searchBus(){
         <div class="result">
           <p>今日の運行区分：${esc(type)}</p>
           <p class="small">
-            ${esc(scheduleSheetNames(date).join(" / "))} を検索しました。
+            検索対象：${esc(scheduleSheetNames(date).join(" / "))}
+          </p>
+          <p class="small">
+            入力例：平01、平01-1、土01、休01
           </p>
         </div>`;
       return;
@@ -661,7 +727,7 @@ async function searchBus(){
           <div class="route">${esc(trip.route || "系統情報なし")}</div>
 
           <div class="line">
-            仕業番号：${esc(operation)}<br>
+            仕業番号：${esc(block.actualOperation)}<br>
             運行表：${esc(block.sheetName)}
           </div>
 
