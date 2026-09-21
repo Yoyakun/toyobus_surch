@@ -855,7 +855,33 @@ async function searchBus(){
         return;
       }
 
-      operation = vehicleInfo.operation;
+      // 号車表の運用番号は数字だけなので、
+      // 今日の運行区分を付けて運用表を検索する。
+      // 平日 → 平01、土曜 → 土01、休日・祝日 → 休01
+      const prefix =
+        type === "平日" ? "平" :
+        type === "土曜" ? "土" : "休";
+
+      let vehicleOperation = String(vehicleInfo.operation)
+        .trim()
+        .replace(/\.0$/, "");
+
+      // 「1」→「01」、「13」→「13」
+      if (/^\d+$/.test(vehicleOperation)) {
+        vehicleOperation =
+          String(Number(vehicleOperation)).padStart(2, "0");
+      } else {
+        // 万一「01-1」などが号車表側に入っている場合にも対応
+        vehicleOperation =
+          vehicleOperation.replace(/^0+(?=\d)/, "");
+        const m = vehicleOperation.match(/^(\d+)(.*)$/);
+        if (m) {
+          vehicleOperation =
+            String(Number(m[1])).padStart(2, "0") + m[2];
+        }
+      }
+
+      operation = prefix + vehicleOperation;
     }
 
     // 運用表から現在の運行を検索
@@ -997,7 +1023,7 @@ function updateSearchPlaceholder(){
 
   if(type === "vehicle"){
     label.textContent = "車両番号";
-    input.placeholder = "例：1234、1234号車";
+    input.placeholder = "例：227、228号車";
   }else{
     label.textContent = "運用番号";
     input.placeholder = "例：平01-1、平01、土01、休01";
