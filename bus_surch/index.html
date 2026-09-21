@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>バス運用検索</title>
+
+<!-- Excel読み込み用 -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family:
+        "Yu Gothic",
+        "Meiryo",
+        sans-serif;
+
+    background: #f3f5f7;
+    color: #222;
+}
+
+.container {
+    width: 95%;
+    max-width: 650px;
+    margin: 30px auto;
+}
+
+h1 {
+    text-align: center;
+    margin-bottom: 25px;
+}
+
+.search-box {
+    background: white;
+    padding: 20px;
+    border-radius: 15px;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.1);
+}
+
+label {
+    display: block;
+    font-weight: bold;
+    margin-bottom: 8px;
+}
+
+input {
+    width: 100%;
+    padding: 14px;
+    font-size: 18px;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+}
+
+button {
+    width: 100%;
+    margin-top: 15px;
+    padding: 14px;
+    border: none;
+    border-radius: 8px;
+    background: #1976d2;
+    color: white;
+    font-size: 18px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #1565c0;
+}
+
+#status {
+    text-align: center;
+    margin-top: 20px;
+}
+
+.result {
+    margin-top: 20px;
+    background: white;
+    border-radius: 15px;
+    padding: 20px;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.1);
+}
+
+.running {
+    border-left: 7px solid #2e7d32;
+}
+
+.not-running {
+    border-left: 7px solid #777;
+}
+
+.route {
+    font-size: 25px;
+    font-weight: bold;
+    margin-bottom: 15px;
+}
+
+.direction {
+    font-size: 19px;
+    margin-bottom: 15px;
+}
+
+.location {
+    font-size: 21px;
+    font-weight: bold;
+    margin: 15px 0;
+}
+
+.bus-number {
+    font-size: 27px;
+    font-weight: bold;
+    margin-top: 20px;
+}
+
+.time {
+    color: #666;
+    margin-top: 15px;
+}
+
+.next-stop {
+    margin-top: 15px;
+    padding: 12px;
+    background: #f0f7ff;
+    border-radius: 8px;
+}
+
+.error {
+    color: #c62828;
+    font-weight: bold;
+}
+
+.small {
+    color: #777;
+    font-size: 14px;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>🚌 バス運用検索</h1>
+
+<div class="search-box">
+
+<label for="operation">
+運用番号
+</label>
+
+<input
+    type="text"
+    id="operation"
+    placeholder="例：101"
+    inputmode="numeric"
+>
+
+<button onclick="searchBus()">
+検索
+</button>
+
+</div>
+
+<div id="status"></div>
+
+<div id="result"></div>
+
+</div>
+
+
+<script>
+
+
+// ==================================================
+// 設定
+// ==================================================
+
+const SCHEDULE_FILE = "bus_schedule.xlsx";
+const BUS_NUMBER_FILE = "bus_number.xlsx";
+
+
+// ==================================================
+// Excelを読み込む
+// ==================================================
+
+async function loadExcel(filename) {
+
+    const response = await fetch(filename);
+
+    if (!response.ok) {
+        throw new Error(
+            filename + " を読み込めませんでした。"
+        );
+    }
+
+    const buffer = await response.arrayBuffer();
+
+    const workbook = XLSX.read(buffer, {
+        type: "array"
+    });
+
+    const sheetName =
+        workbook.SheetNames[0];
+
+    const sheet =
+        workbook.Sheets[sheetName];
+
+    return XLSX.utils.sheet_to_json(sheet);
+}
+
+
+// ==================================================
+// 時刻を「分」に変換
+// ==================================================
+
+function timeToMinutes(value) {
+
+    if (value === undefined || value === null) {
+        return null;
+    }
+
+    // Excelの時刻がDate型の場合
+    if (value instanceof Date) {
+
+        return (
+            value.getHours() * 60 +
+            value.getMinutes()
+        );
+    }
+
+    let str = String(value).trim();
+
+    // 「10:25」
+    let match =
+        str.match(/^(\d{1,2}):(\d{2})$/);
+
+    if (match) {
+
+        return (
+            Number(match[1]) * 60 +
+            Number(match[2])
+        );
+    }
+
+    // 「10時25分」
+    match =
+        str.match(/^(\d{1,2})時(\d{1,2})分?$/);
+
+    if (match) {
+
+        return (
+            Number(match[1]) * 60 +
+            Number(match[2])
+        );
+    }
+
+    // 数値の場合
+    if (!isNaN(value)) {
+
+        const num = Number(value);
+
+        // Excelの時刻形式
+        if (num >= 0 && num < 1) {
+            return Math.round(num * 24 * 60);
+        }
+
+        // 例：1025
+        if (num >= 100 && num <= 2359) {
+
+            const hour =
+                Math.floor(num / 100);
+
+            const minute =
+                num % 100;
+
+            return hour * 60 + minute;
+        }
+    }
+
+    return null;
+}
+
+
+// ==================================================
+// 現在時刻
+// ==================================================
+
+function getCurrentMinutes() {
+
+    const now = new Date();
+
+    return (
+        now.getHours() * 60 +
+        now.getMinutes()
+    );
+}
+
+
+// ==================================================
+// 今日の日付
+// ==================================================
+
+function getToday() {
+
+    const now = new Date();
+
+    const y =
+        now.getFullYear();
+
+    const m =
+        String(now.getMonth() + 1)
+        .padStart(2, "0");
+
+    const d =
+        String(now.getDate())
+        .padStart(2, "0");
+
+    return `${y}/${m}/${d}`;
+}
+
+
+// ==================================================
+// 日付を比較できる形にする
+// ==================================================
+
+function normalizeDate(value) {
+
+    if (!value) {
+        return "";
+    }
+
+    if (value instanceof Date) {
+
+        const y =
+            value.getFullYear();
+
+        const m =
+            String(value.getMonth() + 1)
+            .padStart(2, "0");
+
+        const d =
+            String(value.getDate())
+            .padStart(2, "0");
+
+        return `${y}/${m}/${d}`;
+    }
+
+    let str =
+        String(value)
+        .trim()
+        .replace(/-/g, "/")
+        .replace(/\./g, "/");
+
+    // YYYY/MM/DD
+    let match =
+        str.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+
+    if (match) {
+
+        return (
+            match[1] + "/" +
+            String(match[2]).padStart(2, "0") + "/" +
+            String(match[3]).padStart(2, "0")
+        );
+    }
+
+    return str;
+}
+
+
+// ==================================================
+// 運用番号を文字列として統一
+// ==================================================
+
+function normalizeOperation(value) {
+
+    if (
+        value === undefined ||
+        value === null
+    ) {
+        return "";
+    }
+
+    return String(value)
+        .trim()
+        .replace(/\.0$/, "");
+}
+
+
+// ==================================================
+// メイン検索
+// ==================================================
+
+async function searchBus() {
+
+    const operation =
+        document
+        .getElementById("operation")
+        .value
+        .trim();
+
+    const status =
+        document.getElementById("status");
+
+    const result =
+        document.getElementById("result");
+
+    status.innerHTML =
+        "🔄 検索しています……";
+
+    result.innerHTML = "";
+
+    if (!operation) {
+
+        status.innerHTML =
+            '<span class="error">運用番号を入力してください。</span>';
+
+        return;
+    }
+
+    try {
+
+        // ------------------------------------------
+        // Excel読み込み
+        // ------------------------------------------
+
+        const scheduleData =
+            await loadExcel(
+                SCHEDULE_FILE
+            );
+
+        const busNumberData =
+            await loadExcel(
+                BUS_NUMBER_FILE
+            );
+
+
+        // ------------------------------------------
+        // 現在時刻
+        // ------------------------------------------
+
+        const now =
+            new Date();
+
+        const currentMinutes =
+            getCurrentMinutes();
+
+        const today =
+            getToday();
+
+
+        // ------------------------------------------
+        // 運用番号で絞り込み
+        // ------------------------------------------
+
+        const operationRows =
+            scheduleData.filter(row => {
+
+                return normalizeOperation(
+                    row["運用番号"]
+                ) === normalizeOperation(
+                    operation
+                );
+
+            });
+
+
+        if (operationRows.length === 0) {
+
+            status.innerHTML =
+                '<span class="error">' +
+                '該当する運用番号がありません。' +
+                '</span>';
+
+            return;
+        }
+
+
+        // ------------------------------------------
+        // 時刻を持つデータだけ取得
+        // ------------------------------------------
+
+        const rows =
+            operationRows
+            .map(row => {
+
+                return {
+
+                    row: row,
+
+                    minutes:
+                        timeToMinutes(
+                            row["時刻"]
+                        )
+
+                };
+
+            })
+            .filter(item =>
+                item.minutes !== null
+            )
+            .sort(
+                (a, b) =>
+                    a.minutes - b.minutes
+            );
+
+
+        // ------------------------------------------
+        // 現在時刻の前後を探す
+        // ------------------------------------------
+
+        let previous = null;
+        let next = null;
+
+        for (const item of rows) {
+
+            if (
+                item.minutes <=
+                currentMinutes
+            ) {
+
+                previous = item;
+
+            }
+
+            if (
+                item.minutes >
+                currentMinutes
+            ) {
+
+                next = item;
+
+                break;
+            }
+        }
+
+
+        // ------------------------------------------
+        // 現在走行中か判定
+        // ------------------------------------------
+
+        /*
+         * 基本的には
+         *
+         * 前の停留所時刻 <= 現在時刻 < 次の停留所時刻
+         *
+         * の場合に運行中とします。
+         */
+
+        if (
+            previous &&
+            next
+        ) {
+
+            const previousRow =
+                previous.row;
+
+            const nextRow =
+                next.row;
+
+
+            // --------------------------------------
+            // 系統
+            // --------------------------------------
+
+            const route =
+                previousRow["系統"] ||
+                nextRow["系統"] ||
+                "系統不明";
+
+
+            // --------------------------------------
+            // 発
+            // --------------------------------------
+
+            const from =
+                previousRow["発"] ||
+                previousRow["始発"] ||
+                "";
+
+
+            // --------------------------------------
+            // 行先
+            // --------------------------------------
+
+            const to =
+                previousRow["行先"] ||
+                nextRow["行先"] ||
+                "";
+
+
+            // --------------------------------------
+            // 現在地
+            // --------------------------------------
+
+            const currentStop =
+                previousRow["停留所"] ||
+                previousRow["バス停"] ||
+                "不明";
+
+
+            const nextStop =
+                nextRow["停留所"] ||
+                nextRow["バス停"] ||
+                "不明";
+
+
+            // --------------------------------------
+            // 号車を検索
+            // --------------------------------------
+
+            const busRow =
+                busNumberData.find(row => {
+
+                    const rowDate =
+                        normalizeDate(
+                            row["日付"]
+                        );
+
+                    const rowOperation =
+                        normalizeOperation(
+                            row["運用番号"]
+                        );
+
+                    return (
+                        rowDate === today &&
+                        rowOperation ===
+                        normalizeOperation(
+                            operation
+                        )
+                    );
+
+                });
+
+
+            let busNumber =
+                "号車情報なし";
+
+
+            if (busRow) {
+
+                busNumber =
+                    busRow["号車"] ||
+                    busRow["車両番号"] ||
+                    "号車情報なし";
+
+            }
+
+
+            // --------------------------------------
+            // 表示
+            // --------------------------------------
+
+            status.innerHTML =
+                "🟢 現在運行中";
+
+
+            result.innerHTML = `
+
+                <div class="result running">
+
+                    <div class="route">
+                        ${escapeHTML(route)}
+                    </div>
+
+                    <div class="direction">
+                        ${escapeHTML(from)}
+                        発 →
+                        ${escapeHTML(to)}
+                        行
+                    </div>
+
+                    <div class="location">
+
+                        現在地<br>
+
+                        ${escapeHTML(currentStop)}
+                        ～ 
+                        ${escapeHTML(nextStop)}
+
+                    </div>
+
+                    <div class="next-stop">
+
+                        次の停留所：
+                        <strong>
+                            ${escapeHTML(nextStop)}
+                        </strong>
+
+                        <br>
+
+                        到着予定：
+                        ${formatMinutes(next.minutes)}
+
+                    </div>
+
+                    <div class="bus-number">
+                        🚌
+                        ${escapeHTML(
+                            String(busNumber)
+                        )}
+                    </div>
+
+                    <div class="time">
+
+                        ${formatCurrentTime()}
+                        現在
+
+                    </div>
+
+                </div>
+
+            `;
+
+            return;
+        }
+
+
+        // ------------------------------------------
+        // 運行していない
+        // ------------------------------------------
+
+        status.innerHTML =
+            "⚪ 現在運行していません";
+
+
+        let message =
+            "現在、この運用番号の便は走っていません。";
+
+
+        if (!previous) {
+
+            message =
+                "本日の運行開始前です。";
+
+        }
+        else if (!next) {
+
+            message =
+                "本日の運行は終了しています。";
+
+        }
+
+
+        result.innerHTML = `
+
+            <div class="result not-running">
+
+                <div class="route">
+                    運用番号：
+                    ${escapeHTML(operation)}
+                </div>
+
+                <p>
+                    ${message}
+                </p>
+
+                ${
+                    next
+                    ?
+                    `
+                    <p>
+                        次の便：
+                        ${formatMinutes(next.minutes)}
+                    </p>
+                    `
+                    :
+                    ""
+                }
+
+                ${
+                    previous
+                    ?
+                    `
+                    <p>
+                        最終確認時刻：
+                        ${formatMinutes(
+                            previous.minutes
+                        )}
+                    </p>
+                    `
+                    :
+                    ""
+                }
+
+            </div>
+
+        `;
+
+    }
+    catch (error) {
+
+        console.error(error);
+
+        status.innerHTML =
+            '<span class="error">' +
+            "データの読み込みに失敗しました。" +
+            "</span>";
+
+        result.innerHTML = `
+
+            <div class="result">
+
+                <p>
+                    ${escapeHTML(
+                        error.message
+                    )}
+                </p>
+
+                <p class="small">
+                    HTMLとExcelファイルが
+                    同じ場所にあるか確認してください。
+                </p>
+
+            </div>
+
+        `;
+
+    }
+
+}
+
+
+// ==================================================
+// 時刻表示
+// ==================================================
+
+function formatMinutes(minutes) {
+
+    const h =
+        Math.floor(minutes / 60);
+
+    const m =
+        minutes % 60;
+
+    return (
+        String(h).padStart(2, "0")
+        + ":" +
+        String(m).padStart(2, "0")
+    );
+}
+
+
+function formatCurrentTime() {
+
+    const now =
+        new Date();
+
+    return (
+        String(now.getHours())
+        .padStart(2, "0")
+        + ":" +
+        String(now.getMinutes())
+        .padStart(2, "0")
+    );
+}
+
+
+// ==================================================
+// HTMLエスケープ
+// ==================================================
+
+function escapeHTML(value) {
+
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+
+// ==================================================
+// Enterキーで検索
+// ==================================================
+
+document
+.getElementById("operation")
+.addEventListener(
+    "keydown",
+    function(event) {
+
+        if (
+            event.key === "Enter"
+        ) {
+
+            searchBus();
+
+        }
+
+    }
+);
+
+</script>
+
+</body>
+</html>
